@@ -1,4 +1,5 @@
 use core::marker::PhantomData;
+use std::mem;
 
 use bevy_ecs::{
     component::{ComponentHooks, ComponentId, StorageType},
@@ -6,6 +7,12 @@ use bevy_ecs::{
     world::{Command, DeferredWorld},
 };
 use bevy_hierarchy::BuildWorldChildren;
+
+#[derive(Debug, Clone)]
+enum WithChildState<B> {
+    Bundle(B),
+    Entity(Entity),
+}
 
 /// A component that, when added to an entity, will add a child entity with the given bundle.
 ///
@@ -29,14 +36,33 @@ use bevy_hierarchy::BuildWorldChildren;
 /// fn spawn_hierarchy(mut commands: Commands) {
 ///   commands.spawn(
 ///    (A, // Parent
-///     WithChild( // This component is removed on spawn
+///     WithChild::new( // This component is removed on spawn
 ///       (A, B(3)) // Child
 ///     )
 ///   ));
 /// }
 /// ```
-#[derive(Debug, Clone, Default)]
-pub struct WithChild<B: Bundle>(pub B);
+#[derive(Debug, Clone)]
+pub struct WithChild<B: Bundle> {
+    state: WithChildState<B>,
+}
+
+impl<B: Bundle + Default> Default for WithChild<B> {
+    fn default() -> Self {
+        Self {
+            state: WithChildState::Bundle(B::default()),
+        }
+    }
+}
+
+impl<B: Bundle> WithChild<B> {
+    /// Create a new `WithChild` component with the given bundle.
+    pub fn new(bundle: B) -> Self {
+        Self {
+            state: WithChildState::Bundle(bundle),
+        }
+    }
+}
 
 impl<B: Bundle> Component for WithChild<B> {
     /// This is a sparse set component as it's only ever added and removed, never iterated over.
@@ -44,6 +70,7 @@ impl<B: Bundle> Component for WithChild<B> {
 
     fn register_component_hooks(hooks: &mut ComponentHooks) {
         hooks.on_add(with_child_hook::<B>);
+        hooks.on_remove(with_remove_child_hook::<B>);
     }
 }
 
@@ -62,6 +89,21 @@ fn with_child_hook<B: Bundle>(
     });
 }
 
+/// A hook that runs whenever [`WithChild`] is added to an entity.
+///
+/// Generates a [`WithChildCommand`].
+fn with_remove_child_hook<B: Bundle>(
+    mut world: DeferredWorld<'_>,
+    entity: Entity,
+    _component_id: ComponentId,
+) {
+    // Component hooks can't perform structural changes, so we need to rely on commands.
+    world.commands().add(WithChildRemoveCommand {
+        parent_entity: entity,
+        _phantom: PhantomData::<B>,
+    });
+}
+
 struct WithChildCommand<B> {
     parent_entity: Entity,
     _phantom: PhantomData<B>,
@@ -69,7 +111,57 @@ struct WithChildCommand<B> {
 
 impl<B: Bundle> Command for WithChildCommand<B> {
     fn apply(self, world: &mut World) {
+        let child_entity = world.spawn_empty().id();
+
         let Some(mut entity_mut) = world.get_entity_mut(self.parent_entity) else {
+            #[cfg(debug_assertions)]
+            panic!("Parent entity not found");
+
+            #[cfg(not(debug_assertions))]
+            world.despawn(child_entity);
+
+            #[cfg(not(debug_assertions))]
+            return;
+        };
+
+        let Some(mut with_child_component) = entity_mut.get_mut::<WithChild<B>>() else {
+            #[cfg(debug_assertions)]
+            panic!("WithChild component not found");
+
+            #[cfg(not(debug_assertions))]
+            world.despawn(child_entity);
+
+            #[cfg(not(debug_assertions))]
+            return;
+        };
+
+        let WithChildState::Bundle(bundle) = mem::replace(
+            &mut with_child_component.state,
+            WithChildState::Entity(child_entity),
+        ) else {
+            #[cfg(debug_assertions)]
+            panic!("Expected WithChildState::Bundle");
+
+            #[cfg(not(debug_assertions))]
+            world.despawn(child_entity);
+
+            #[cfg(not(debug_assertions))]
+            return;
+        };
+
+        let child_entity = world.spawn(bundle).id();
+        world.entity_mut(self.parent_entity).add_child(child_entity);
+    }
+}
+
+struct WithChildRemoveCommand<B> {
+    parent_entity: Entity,
+    _phantom: PhantomData<B>,
+}
+
+impl<B: Bundle> Command for WithChildRemoveCommand<B> {
+    fn apply(self, world: &mut World) {
+        let Some(entity_mut) = world.get_entity(self.parent_entity) else {
             #[cfg(debug_assertions)]
             panic!("Parent entity not found");
 
@@ -77,16 +169,29 @@ impl<B: Bundle> Command for WithChildCommand<B> {
             return;
         };
 
-        let Some(with_child_component) = entity_mut.take::<WithChild<B>>() else {
+        let Some(with_child_component) = entity_mut.get::<WithChild<B>>() else {
             #[cfg(debug_assertions)]
             panic!("WithChild component not found");
+
+            #[cfg(not(debug_assertions))]
+            world.despawn(child_entity);
 
             #[cfg(not(debug_assertions))]
             return;
         };
 
-        let child_entity = world.spawn(with_child_component.0).id();
-        world.entity_mut(self.parent_entity).add_child(child_entity);
+        let WithChildState::Entity(entity) = with_child_component.state else {
+            #[cfg(debug_assertions)]
+            panic!("Expected WithChildState::Bundle");
+
+            #[cfg(not(debug_assertions))]
+            world.despawn(child_entity);
+
+            #[cfg(not(debug_assertions))]
+            return;
+        };
+
+        world.despawn(entity);
     }
 }
 
@@ -228,11 +333,10 @@ mod tests {
     fn with_child() {
         let mut world = World::default();
 
-        let parent = world.spawn(WithChild((A, B(3)))).id();
+        let parent = world.spawn(WithChild::new((A, B(3)))).id();
         // FIXME: this should not be needed!
         world.flush();
 
-        assert!(!world.entity(parent).contains::<WithChild<(A, B)>>());
         assert!(!world.entity(parent).contains::<A>());
         assert!(!world.entity(parent).contains::<B>());
 
@@ -286,7 +390,7 @@ mod tests {
     fn with_distinct_children() {
         let mut world = World::default();
 
-        let parent = world.spawn((WithChild(A), WithChild(B(1)))).id();
+        let parent = world.spawn((WithChild::new(A), WithChild::new(B(1)))).id();
         // FIXME: this should not be needed!
         world.flush();
 
@@ -296,7 +400,7 @@ mod tests {
         assert_eq!(world.get::<B>(children[1]), Some(&B(1)));
 
         // Ordering should matter
-        let parent = world.spawn((WithChild(B(1)), WithChild(A))).id();
+        let parent = world.spawn((WithChild::new(B(1)), WithChild::new(A))).id();
         // FIXME: this should not be needed!
         world.flush();
 
@@ -310,7 +414,9 @@ mod tests {
     fn grandchildren() {
         let mut world = World::default();
 
-        let parent = world.spawn(WithChild((A, WithChild((A, B(3)))))).id();
+        let parent = world
+            .spawn(WithChild::new((A, WithChild::new((A, B(3))))))
+            .id();
         // FIXME: this should not be needed!
         world.flush();
 
@@ -335,7 +441,7 @@ mod tests {
         let parent = world
             .spawn(HierarchicalBundle {
                 a: A,
-                child: WithChild(ABBundle { a: A, b: B(17) }),
+                child: WithChild::new(ABBundle { a: A, b: B(17) }),
             })
             .id();
 
@@ -357,7 +463,7 @@ mod tests {
     #[test]
     fn command_form() {
         fn spawn_with_child(mut commands: Commands) -> Entity {
-            commands.spawn((A, WithChild(B(5)))).id()
+            commands.spawn((A, WithChild::new(B(5)))).id()
         }
 
         let mut world = World::new();
