@@ -174,18 +174,12 @@ impl<B: Bundle> Command for WithChildRemoveCommand<B> {
             panic!("WithChild component not found");
 
             #[cfg(not(debug_assertions))]
-            world.despawn(child_entity);
-
-            #[cfg(not(debug_assertions))]
             return;
         };
 
         let WithChildState::Entity(entity) = with_child_component.state else {
             #[cfg(debug_assertions)]
-            panic!("Expected WithChildState::Bundle");
-
-            #[cfg(not(debug_assertions))]
-            world.despawn(child_entity);
+            panic!("Expected WithChildState::Entity");
 
             #[cfg(not(debug_assertions))]
             return;
