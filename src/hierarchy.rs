@@ -29,7 +29,7 @@ use bevy_hierarchy::BuildWorldChildren;
 /// fn spawn_hierarchy(mut commands: Commands) {
 ///   commands.spawn(
 ///    (A, // Parent
-///     WithChild::new( // This component is removed on spawn
+///     WithChild::new(
 ///       (A, B(3)) // Child
 ///     )
 ///   ));
@@ -37,7 +37,10 @@ use bevy_hierarchy::BuildWorldChildren;
 /// ```
 #[derive(Debug, Clone)]
 pub struct WithChild<B: Bundle> {
-    bundle: Option<B>,
+    /// The bundle to use when spawning the child entity.
+    /// This is an `Option` to allow for moving the bundle out of the component
+    /// and is stored on the heap to minimize size overhead.
+    bundle: Option<Box<B>>,
 }
 
 impl<B: Bundle + Default> Default for WithChild<B> {
@@ -50,7 +53,7 @@ impl<B: Bundle> WithChild<B> {
     /// Create a new `WithChild` component with the given bundle.
     pub fn new(bundle: B) -> Self {
         Self {
-            bundle: Some(bundle),
+            bundle: Some(Box::new(bundle)),
         }
     }
 }
@@ -125,7 +128,7 @@ impl<B: Bundle> Command for WithChildCommand<B> {
         };
 
         let bundle = with_child_component.bundle.take().unwrap();
-        let child_entity = world.spawn(bundle).id();
+        let child_entity = world.spawn(*bundle).id();
 
         world
             .entity_mut(self.parent_entity)
@@ -153,7 +156,6 @@ impl<B: Bundle> Command for WithChildRemoveCommand<B> {
         };
 
         if let Some(with_child_component) = entity_mut.get::<WithChildEntity<B>>() {
-            dbg!("despawn");
             world.despawn(with_child_component.child_entity);
         };
     }
