@@ -1,5 +1,4 @@
 use core::marker::PhantomData;
-use std::mem;
 
 use bevy_ecs::{
     component::{ComponentHooks, ComponentId, StorageType},
@@ -7,12 +6,6 @@ use bevy_ecs::{
     world::{Command, DeferredWorld},
 };
 use bevy_hierarchy::BuildWorldChildren;
-
-#[derive(Debug, Clone)]
-enum WithChildState<B> {
-    Bundle(B),
-    Entity(Entity),
-}
 
 /// A component that, when added to an entity, will add a child entity with the given bundle.
 ///
@@ -44,14 +37,12 @@ enum WithChildState<B> {
 /// ```
 #[derive(Debug, Clone)]
 pub struct WithChild<B: Bundle> {
-    state: WithChildState<B>,
+    bundle: Option<B>,
 }
 
 impl<B: Bundle + Default> Default for WithChild<B> {
     fn default() -> Self {
-        Self {
-            state: WithChildState::Bundle(B::default()),
-        }
+        Self::new(B::default())
     }
 }
 
@@ -59,7 +50,7 @@ impl<B: Bundle> WithChild<B> {
     /// Create a new `WithChild` component with the given bundle.
     pub fn new(bundle: B) -> Self {
         Self {
-            state: WithChildState::Bundle(bundle),
+            bundle: Some(bundle),
         }
     }
 }
@@ -104,6 +95,12 @@ fn with_remove_child_hook<B: Bundle>(
     });
 }
 
+#[derive(Component)]
+struct WithChildEntity<B> {
+    child_entity: Entity,
+    _phantom: PhantomData<B>,
+}
+
 struct WithChildCommand<B> {
     parent_entity: Entity,
     _phantom: PhantomData<B>,
@@ -111,14 +108,9 @@ struct WithChildCommand<B> {
 
 impl<B: Bundle> Command for WithChildCommand<B> {
     fn apply(self, world: &mut World) {
-        let child_entity = world.spawn_empty().id();
-
         let Some(mut entity_mut) = world.get_entity_mut(self.parent_entity) else {
             #[cfg(debug_assertions)]
             panic!("Parent entity not found");
-
-            #[cfg(not(debug_assertions))]
-            world.despawn(child_entity);
 
             #[cfg(not(debug_assertions))]
             return;
@@ -129,28 +121,19 @@ impl<B: Bundle> Command for WithChildCommand<B> {
             panic!("WithChild component not found");
 
             #[cfg(not(debug_assertions))]
-            world.despawn(child_entity);
-
-            #[cfg(not(debug_assertions))]
             return;
         };
 
-        let WithChildState::Bundle(bundle) = mem::replace(
-            &mut with_child_component.state,
-            WithChildState::Entity(child_entity),
-        ) else {
-            #[cfg(debug_assertions)]
-            panic!("Expected WithChildState::Bundle");
-
-            #[cfg(not(debug_assertions))]
-            world.despawn(child_entity);
-
-            #[cfg(not(debug_assertions))]
-            return;
-        };
-
+        let bundle = with_child_component.bundle.take().unwrap();
         let child_entity = world.spawn(bundle).id();
-        world.entity_mut(self.parent_entity).add_child(child_entity);
+
+        world
+            .entity_mut(self.parent_entity)
+            .insert(WithChildEntity {
+                child_entity,
+                _phantom: PhantomData::<B>,
+            })
+            .add_child(child_entity);
     }
 }
 
@@ -169,23 +152,10 @@ impl<B: Bundle> Command for WithChildRemoveCommand<B> {
             return;
         };
 
-        let Some(with_child_component) = entity_mut.get::<WithChild<B>>() else {
-            #[cfg(debug_assertions)]
-            panic!("WithChild component not found");
-
-            #[cfg(not(debug_assertions))]
-            return;
+        if let Some(with_child_component) = entity_mut.get::<WithChildEntity<B>>() {
+            dbg!("despawn");
+            world.despawn(with_child_component.child_entity);
         };
-
-        let WithChildState::Entity(entity) = with_child_component.state else {
-            #[cfg(debug_assertions)]
-            panic!("Expected WithChildState::Entity");
-
-            #[cfg(not(debug_assertions))]
-            return;
-        };
-
-        world.despawn(entity);
     }
 }
 
@@ -340,6 +310,13 @@ mod tests {
         let child_entity = children[0];
         assert_eq!(world.get::<A>(child_entity), Some(&A));
         assert_eq!(world.get::<B>(child_entity), Some(&B(3)));
+
+        world.entity_mut(parent).remove::<WithChild<(A, B)>>();
+        // FIXME: this should not be needed!
+        world.flush();
+
+        assert!(world.get::<A>(child_entity).is_none());
+        assert!(world.get::<B>(child_entity).is_none());
     }
 
     #[test]
@@ -442,7 +419,6 @@ mod tests {
         // FIXME: this should not be needed!
         world.flush();
 
-        assert!(!world.entity(parent).contains::<WithChild<ABBundle>>());
         assert!(world.entity(parent).contains::<A>());
         assert!(!world.entity(parent).contains::<B>());
 
@@ -463,7 +439,6 @@ mod tests {
         let mut world = World::new();
         let parent = world.run_system_once(spawn_with_child);
 
-        assert!(!world.entity(parent).contains::<WithChild<B>>());
         assert!(world.entity(parent).contains::<A>());
         assert!(!world.entity(parent).contains::<B>());
 
